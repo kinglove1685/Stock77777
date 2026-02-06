@@ -18,12 +18,18 @@ COL_NAME = "품명"
 COL_STOCK = "재고"
 COL_POWER = "파워"
 COL_COLOR = "컬러"
+COL_COLOR_CODE = "컬러코드"
 COL_TONE = "톤수"
+COL_GROUP = "구분"
 COL_LOTNO = "LOTNO"
+COL_CYL = "CYL"
+COL_AXIS = "AXIS"
+COL_ADD = "ADD"
 COL_COLOR_HEX = "컬러_색상"
 SUMMARY_SHEET = "SUMMARY"
+SUMMARY_TORIC_SHEET = "SUMMARY (ToricMF)"
 
-DEFAULT_SEARCH_COLS = [COL_P, COL_T, COL_U, COL_NAME, COL_ITEM, COL_COLOR, COL_TONE]
+DEFAULT_SEARCH_COLS = [COL_P, COL_T, COL_U, COL_NAME, COL_ITEM, COL_COLOR, COL_COLOR_CODE, COL_TONE]
 
 CODE_PATTERN = re.compile(r"^[PTU]\d+$", re.IGNORECASE)
 CODE_COLOR_PATTERN = re.compile(r"^([PTU]\d+)(.+)$", re.IGNORECASE)
@@ -58,6 +64,57 @@ def _excel_color_to_hex(cell) -> str:
     return ""
 
 
+def _fmt_power_value(v):
+    try:
+        fv = float(v)
+    except Exception:
+        return v
+    sign = "-" if fv <= 0 else "+"
+    return f"{sign}{abs(fv):05.2f}"
+
+
+def _collect_powers(ws, start_row: int) -> list[str]:
+    powers = []
+    r = start_row
+    while True:
+        v = ws.cell(row=r, column=2).value
+        if v is None or str(v).strip() == "":
+            break
+        if str(v).strip() in ("합계", "총합계"):
+            break
+        powers.append(v)
+        r += 1
+
+    # Ensure -00.25 exists between -00.00 and -00.50
+    target = -0.25
+    vals = []
+    for p in powers:
+        try:
+            vals.append(float(str(p).strip()))
+        except Exception:
+            vals.append(None)
+
+    if target not in [v for v in vals if v is not None]:
+        insert_idx = None
+        for i, v in enumerate(vals):
+            if v is None:
+                continue
+            if v == 0:
+                insert_idx = i + 1
+                continue
+            if v < 0 and v > target:
+                insert_idx = i + 1
+                continue
+            if v <= target:
+                insert_idx = i
+                break
+        if insert_idx is None:
+            insert_idx = len(powers)
+        powers.insert(insert_idx, _fmt_power_value(target))
+
+    return [_fmt_power_value(p) for p in powers]
+
+
 def _load_color_column_from_workbook(wb, data_len: int) -> list[str]:
     # Excel column E -> 5 (1-based)
     ws = wb[SHEET_NAME]
@@ -72,7 +129,7 @@ def load_inventory(path: Path) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=SHEET_NAME)
 
     # Normalize key columns to strings
-    for col in [COL_P, COL_T, COL_U, COL_ITEM, COL_NAME, COL_COLOR, COL_TONE, COL_LOTNO]:
+    for col in [COL_P, COL_T, COL_U, COL_ITEM, COL_NAME, COL_COLOR, COL_COLOR_CODE, COL_TONE, COL_GROUP, COL_LOTNO, COL_CYL, COL_AXIS, COL_ADD]:
         if col in df.columns:
             df[col] = _normalize_series(df[col])
 
@@ -97,7 +154,7 @@ def load_inventory_from_bytes(data: bytes) -> pd.DataFrame:
     bio = BytesIO(data)
     df = pd.read_excel(bio, sheet_name=SHEET_NAME)
 
-    for col in [COL_P, COL_T, COL_U, COL_ITEM, COL_NAME, COL_COLOR, COL_TONE, COL_LOTNO]:
+    for col in [COL_P, COL_T, COL_U, COL_ITEM, COL_NAME, COL_COLOR, COL_COLOR_CODE, COL_TONE, COL_GROUP, COL_LOTNO, COL_CYL, COL_AXIS, COL_ADD]:
         if col in df.columns:
             df[col] = _normalize_series(df[col])
 
@@ -170,103 +227,137 @@ def build_summary_export(
     pcode: str,
     color: str,
     name: str,
+    tcode: str | None = None,
+    color_code: str | None = None,
+    tone: str | None = None,
+    cyl: str | None = None,
+    axis: str | None = None,
+    add: str | None = None,
     source_path: Path | None = None,
     source_bytes: bytes | None = None,
+    use_toric: bool = False,
 ) -> tuple[bytes, bool]:
     wb = _open_workbook_from_source(source_path, source_bytes)
-    if SUMMARY_SHEET not in wb.sheetnames:
-        raise ValueError("SUMMARY sheet not found")
-    ws = wb[SUMMARY_SHEET]
-
-    target_col = _find_summary_column(ws, pcode, color, name)
+    sheet_name = SUMMARY_TORIC_SHEET if use_toric else SUMMARY_SHEET
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"{sheet_name} sheet not found")
+    ws = wb[sheet_name]
 
     out_wb = Workbook()
     out_ws = out_wb.active
     out_ws.title = "EXPORT"
 
-    summary_name = None
-    if target_col is not None:
-        summary_name = ws.cell(row=2, column=target_col).value
+    if use_toric:
+        out_ws["C2"] = name
+        out_ws.merge_cells("C2:E2")
+        out_ws["C3"] = "CODE"
+        out_ws["D3"] = tcode or ""
+        out_ws["E3"] = pcode
+        out_ws["C4"] = "CYL"
+        out_ws["D4"] = cyl or ""
+        out_ws["E4"] = ""
+        out_ws.merge_cells("D4:E4")
+        out_ws["C5"] = "AXIS"
+        out_ws["D5"] = axis or ""
+        out_ws["E5"] = ""
+        out_ws.merge_cells("D5:E5")
+        out_ws["C6"] = "ADD"
+        out_ws["D6"] = add or ""
+        out_ws["E6"] = ""
+        out_ws.merge_cells("D6:E6")
+        out_ws["C7"] = color or ""
+        out_ws["D7"] = color_code or ""
+        out_ws["E7"] = tone or ""
+        out_ws["B7"] = ws.cell(row=7, column=2).value or "파워"
+        powers = _collect_powers(ws, start_row=8)
+        row = 8
+    else:
+        out_ws["C2"] = name
+        out_ws.merge_cells("C2:E2")
+        out_ws["C3"] = "CODE"
+        out_ws["D3"] = tcode or ""
+        out_ws["E3"] = pcode
+        out_ws["C4"] = color or ""
+        out_ws["D4"] = color_code or ""
+        out_ws["E4"] = tone or ""
+        out_ws["B4"] = ws.cell(row=4, column=2).value or "파워"
+        powers = _collect_powers(ws, start_row=5)
+        row = 5
 
-    out_ws["C2"] = summary_name if summary_name else name
-    out_ws["C3"] = pcode
-    out_ws["C4"] = color or ""
-    out_ws["B4"] = "파워"
-
-    row = 5
-    total = 0.0
-    for r in range(5, ws.max_row + 1):
-        power = ws.cell(row=r, column=2).value
-        if power is None or str(power).strip() == "":
-            break
-        qty = 0
-        if target_col is not None:
-            val = ws.cell(row=r, column=target_col).value
-            qty = 0 if val is None else val
-
+    for power in powers:
         out_ws.cell(row=row, column=2, value=power)
-        out_ws.cell(row=row, column=3, value=qty)
-
-        try:
-            total += float(qty)
-        except Exception:
-            pass
+        out_ws.cell(row=row, column=3, value=0)
+        out_ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=5)
         row += 1
 
     out_ws.cell(row=row, column=2, value="합계")
-    out_ws.cell(row=row, column=3, value=total)
+    out_ws.cell(row=row, column=3, value=0)
+    out_ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=5)
 
     from io import BytesIO
 
     bio = BytesIO()
     out_wb.save(bio)
-    return bio.getvalue(), target_col is not None
+    return bio.getvalue(), True
 
 
 def build_summary_export_multi(
     rows: list[dict],
     source_path: Path | None = None,
     source_bytes: bytes | None = None,
+    use_toric: bool = False,
 ) -> tuple[bytes, int]:
     wb = _open_workbook_from_source(source_path, source_bytes)
-    if SUMMARY_SHEET not in wb.sheetnames:
-        raise ValueError("SUMMARY sheet not found")
-    ws = wb[SUMMARY_SHEET]
+    sheet_name = SUMMARY_TORIC_SHEET if use_toric else SUMMARY_SHEET
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"{sheet_name} sheet not found")
+    ws = wb[sheet_name]
 
-    # Collect power rows from SUMMARY (column B, starting row 5)
-    powers = []
-    r = 5
-    while True:
-        v = ws.cell(row=r, column=2).value
-        if v is None or str(v).strip() == "":
-            break
-        if str(v).strip() in ("합계", "총합계"):
-            break
-        powers.append(v)
-        r += 1
+    if use_toric:
+        powers = _collect_powers(ws, start_row=8)
+        header_row = 7
+        power_start_row = 8
+    else:
+        powers = _collect_powers(ws, start_row=5)
+        header_row = 4
+        power_start_row = 5
 
     out_wb = Workbook()
     out_ws = out_wb.active
     out_ws.title = "EXPORT"
 
-    out_ws["B4"] = "컬러"
-    out_ws["B5"] = "톤수"
-    out_ws["B6"] = "파워"
+    out_ws.cell(row=header_row, column=2, value=ws.cell(row=header_row, column=2).value or "파워")
 
     # Build product -> power qty map from search result rows
     product_keys = []
     power_map = {}
+    info_map = {}
     for row in rows:
         pcode = str(row.get(COL_P, "")).strip()
+        tcode = str(row.get(COL_T, "")).strip()
         color = str(row.get(COL_COLOR, "")).strip()
+        color_code = str(row.get(COL_COLOR_CODE, "")).strip()
         name = str(row.get(COL_NAME, "")).strip()
         tone = str(row.get(COL_TONE, "")).strip()
+        cyl = str(row.get(COL_CYL, "")).strip()
+        axis = str(row.get(COL_AXIS, "")).strip()
+        add = str(row.get(COL_ADD, "")).strip()
+        group = str(row.get(COL_GROUP, "")).strip()
         power = str(row.get(COL_POWER, "")).strip()
         qty = row.get(COL_STOCK, 0)
-        key = (pcode, color, tone, name)
+        if use_toric:
+            key = (name, pcode, tcode, color, color_code, tone, cyl, axis, add)
+        else:
+            key = (name, pcode, tcode, color, color_code, tone)
         if key not in power_map:
             power_map[key] = {}
             product_keys.append(key)
+            info_map[key] = {
+                COL_CYL: cyl,
+                COL_AXIS: axis,
+                COL_ADD: add,
+                COL_GROUP: group,
+            }
         p_norm = power.strip().upper()
         try:
             qty_val = float(qty)
@@ -274,45 +365,98 @@ def build_summary_export_multi(
             qty_val = 0.0
         power_map[key][p_norm] = power_map[key].get(p_norm, 0.0) + qty_val
 
-    not_found = 0
+    if use_toric:
+        def _num_or_inf(v):
+            try:
+                return float(str(v).strip())
+            except Exception:
+                return float("inf")
+
+        product_keys.sort(
+            key=lambda k: (
+                _num_or_inf(k[6]),  # CYL
+                _num_or_inf(k[7]),  # AXIS
+                _num_or_inf(k[8]),  # ADD
+                k[0],               # name
+                k[1],               # pcode
+                k[2],               # tcode
+            )
+        )
+
     for idx, key in enumerate(product_keys):
-        pcode, color, tone, name = key
+        if use_toric:
+            name, pcode, tcode, color, color_code, tone, cyl, axis, add = key
+        else:
+            name, pcode, tcode, color, color_code, tone = key
 
-        out_col = 3 + idx
-        target_col = _find_summary_column(ws, pcode, color, name)
-        if target_col is None:
-            not_found += 1
+        out_col = 3 + (idx * 3)
 
-        summary_name = None
-        if target_col is not None:
-            summary_name = ws.cell(row=2, column=target_col).value
+        out_ws.cell(row=2, column=out_col, value=name)
+        out_ws.merge_cells(start_row=2, start_column=out_col, end_row=2, end_column=out_col + 2)
+        out_ws.cell(row=3, column=out_col, value="CODE")
+        out_ws.cell(row=3, column=out_col + 1, value=tcode)
+        out_ws.cell(row=3, column=out_col + 2, value=pcode)
+        if use_toric:
+            info = info_map.get(key, {})
+            group_val = str(info.get(COL_GROUP, "")).strip().upper()
+            show_cyl_axis = True
+            show_add = True
+            if group_val == "TORIC":
+                show_add = False
+            elif group_val == "M/F":
+                show_cyl_axis = False
+            elif group_val == "TORIC+M/F":
+                show_cyl_axis = True
+                show_add = True
 
-        out_ws.cell(row=2, column=out_col, value=summary_name if summary_name else name)
-        out_ws.cell(row=3, column=out_col, value=pcode)
-        out_ws.cell(row=4, column=out_col, value=color or "")
-        out_ws.cell(row=5, column=out_col, value=tone or "")
+            out_ws.cell(row=4, column=out_col, value="CYL")
+            out_ws.cell(row=4, column=out_col + 1, value=info.get(COL_CYL, "") if show_cyl_axis else "")
+            out_ws.cell(row=4, column=out_col + 2, value="")
+            out_ws.merge_cells(start_row=4, start_column=out_col + 1, end_row=4, end_column=out_col + 2)
+            out_ws.cell(row=5, column=out_col, value="AXIS")
+            out_ws.cell(row=5, column=out_col + 1, value=info.get(COL_AXIS, "") if show_cyl_axis else "")
+            out_ws.cell(row=5, column=out_col + 2, value="")
+            out_ws.merge_cells(start_row=5, start_column=out_col + 1, end_row=5, end_column=out_col + 2)
+            out_ws.cell(row=6, column=out_col, value="ADD")
+            out_ws.cell(row=6, column=out_col + 1, value=info.get(COL_ADD, "") if show_add else "")
+            out_ws.cell(row=6, column=out_col + 2, value="")
+            out_ws.merge_cells(start_row=6, start_column=out_col + 1, end_row=6, end_column=out_col + 2)
+            out_ws.cell(row=7, column=out_col, value=color or "")
+            out_ws.cell(row=7, column=out_col + 1, value=color_code or "")
+            out_ws.cell(row=7, column=out_col + 2, value=tone or "")
+        else:
+            out_ws.cell(row=4, column=out_col, value=color or "")
+            out_ws.cell(row=4, column=out_col + 1, value=color_code or "")
+            out_ws.cell(row=4, column=out_col + 2, value=tone or "")
 
         total = 0.0
         local_map = power_map.get(key, {})
         for i, power in enumerate(powers):
-            row = 6 + i
+            row = power_start_row + i
             p_norm = str(power).strip().upper()
             qty = local_map.get(p_norm, 0.0)
             out_ws.cell(row=row, column=2, value=power)
             out_ws.cell(row=row, column=out_col, value=qty)
+            out_ws.merge_cells(start_row=row, start_column=out_col, end_row=row, end_column=out_col + 2)
             try:
                 total += float(qty)
             except Exception:
                 pass
 
-        out_ws.cell(row=6 + len(powers), column=2, value="합계")
-        out_ws.cell(row=6 + len(powers), column=out_col, value=total)
+        out_ws.cell(row=power_start_row + len(powers), column=2, value="합계")
+        out_ws.cell(row=power_start_row + len(powers), column=out_col, value=total)
+        out_ws.merge_cells(
+            start_row=power_start_row + len(powers),
+            start_column=out_col,
+            end_row=power_start_row + len(powers),
+            end_column=out_col + 2,
+        )
 
     from io import BytesIO
 
     bio = BytesIO()
     out_wb.save(bio)
-    return bio.getvalue(), not_found
+    return bio.getvalue(), 0
 
 
 def _term_mask(df: pd.DataFrame, term: str) -> pd.Series:
@@ -399,18 +543,7 @@ def _term_mask(df: pd.DataFrame, term: str) -> pd.Series:
     return mask
 
 
-def search_inventory(df: pd.DataFrame, query: str) -> pd.DataFrame:
-    # Split by spaces or commas
-    terms = [t for t in re.split(r"[\s,]+", query) if t.strip()]
-    if not terms:
-        return df.head(0)
-
-    mask = pd.Series(False, index=df.index)
-    for term in terms:
-        mask = mask | _term_mask(df, term)
-
-    filtered = df[mask]
-
+def _summarize_inventory(df: pd.DataFrame) -> pd.DataFrame:
     # Group by P/T + color + tone + power and keep a representative name
     group_cols = []
     if COL_P in df.columns:
@@ -419,16 +552,24 @@ def search_inventory(df: pd.DataFrame, query: str) -> pd.DataFrame:
         group_cols.append(COL_T)
     if COL_COLOR in df.columns:
         group_cols.append(COL_COLOR)
+    if COL_COLOR_CODE in df.columns:
+        group_cols.append(COL_COLOR_CODE)
     if COL_TONE in df.columns:
         group_cols.append(COL_TONE)
     if COL_POWER in df.columns:
         group_cols.append(COL_POWER)
+    if COL_CYL in df.columns:
+        group_cols.append(COL_CYL)
+    if COL_AXIS in df.columns:
+        group_cols.append(COL_AXIS)
+    if COL_ADD in df.columns:
+        group_cols.append(COL_ADD)
 
     if not group_cols:
-        return filtered.head(0)
+        return df.head(0)
 
     result = (
-        filtered.groupby(group_cols, dropna=False)
+        df.groupby(group_cols, dropna=False)
         .agg(
             **{
                 COL_NAME: (COL_NAME, "first") if COL_NAME in df.columns else (COL_P, "first"),
@@ -446,23 +587,47 @@ def search_inventory(df: pd.DataFrame, query: str) -> pd.DataFrame:
 
     # Power formatting: -00.00, -05.25, -04.75
     if COL_POWER in result.columns:
-        def _fmt_power(v):
-            try:
-                fv = float(v)
-            except Exception:
-                return v
-            sign = "-" if fv <= 0 else "+"
-            return f"{sign}{abs(fv):05.2f}"
-
-        result[COL_POWER] = result[COL_POWER].apply(_fmt_power)
+        result[COL_POWER] = result[COL_POWER].apply(_fmt_power_value)
 
     # Column order: P, T, 컬러, 톤수, 파워, 품명, 재고, LOTNO 합계수량
-    preferred = [COL_P, COL_T, COL_COLOR, COL_TONE, COL_POWER, COL_NAME, COL_STOCK, "LOTNO 합계수량", COL_COLOR_HEX]
+    preferred = [
+        COL_P,
+        COL_T,
+        COL_COLOR,
+        COL_COLOR_CODE,
+        COL_TONE,
+        COL_POWER,
+        COL_CYL,
+        COL_AXIS,
+        COL_ADD,
+        COL_NAME,
+        COL_STOCK,
+        "LOTNO 합계수량",
+        COL_COLOR_HEX,
+    ]
     cols = [c for c in preferred if c in result.columns]
     if cols:
         result = result[cols]
 
     return result
+
+
+def summarize_inventory(df: pd.DataFrame) -> pd.DataFrame:
+    return _summarize_inventory(df)
+
+
+def search_inventory(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    # Split by spaces or commas
+    terms = [t for t in re.split(r"[\s,]+", query) if t.strip()]
+    if not terms:
+        return df.head(0)
+
+    mask = pd.Series(False, index=df.index)
+    for term in terms:
+        mask = mask | _term_mask(df, term)
+
+    filtered = df[mask]
+    return _summarize_inventory(filtered)
 
 
 def lot_breakdown(df: pd.DataFrame, row: dict) -> pd.DataFrame:
@@ -483,6 +648,14 @@ def lot_breakdown(df: pd.DataFrame, row: dict) -> pd.DataFrame:
             filters.append(power_series == round(power_val, 2))
         except Exception:
             filters.append(df[COL_POWER].astype(str) == str(row.get(COL_POWER, "")).strip())
+    if COL_COLOR_CODE in df.columns and row.get(COL_COLOR_CODE) is not None:
+        filters.append(df[COL_COLOR_CODE].astype(str) == str(row.get(COL_COLOR_CODE, "")).strip())
+    if COL_CYL in df.columns and row.get(COL_CYL) is not None:
+        filters.append(df[COL_CYL].astype(str) == str(row.get(COL_CYL, "")).strip())
+    if COL_AXIS in df.columns and row.get(COL_AXIS) is not None:
+        filters.append(df[COL_AXIS].astype(str) == str(row.get(COL_AXIS, "")).strip())
+    if COL_ADD in df.columns and row.get(COL_ADD) is not None:
+        filters.append(df[COL_ADD].astype(str) == str(row.get(COL_ADD, "")).strip())
 
     if not filters:
         return df.head(0)
